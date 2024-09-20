@@ -1,4 +1,4 @@
-module github.com/EdgeHub-Repo/EdgeSync360.EdgeHub.Edge.Golang.SDK
+module github.com/EdgeHub-Repo/dc-edge-sdk-golang
 
 go 1.20
 
