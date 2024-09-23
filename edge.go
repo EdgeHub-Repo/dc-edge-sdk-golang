@@ -7,16 +7,17 @@ import (
 
 // EdgeAgentOptions ...
 type EdgeAgentOptions struct {
-	ReconnectInterval int // second
-	NodeID            string
-	DeviceID          string
-	Type              byte
-	HeartBeatInterval int
-	DataRecover       bool
-	ConnectType       string
-	UseSecure         bool
-	MQTT              *MQTTOptions
-	DCCS              *DCCSOptions
+	ReconnectInterval  int // second
+	NodeID             string
+	DeviceID           string
+	Type               byte
+	HeartBeatInterval  int
+	DataRecover        bool
+	ConnectType        string
+	UseSecure          bool
+	MQTT               *MQTTOptions
+	DCCS               *DCCSOptions
+	AzureIoTHubOptions *AzureIoTHubOptions
 }
 
 // MQTTOptions ...
@@ -32,6 +33,11 @@ type MQTTOptions struct {
 type DCCSOptions struct {
 	URL string
 	Key string
+}
+
+// AzureIoTHub Options ...
+type AzureIoTHubOptions struct {
+	ConnectionString string
 }
 
 // DeviceStatus ...
@@ -211,6 +217,9 @@ func NewEdgeAgentOptions() *EdgeAgentOptions {
 			URL: "https://api-dccs.wise-paas.com/",
 			Key: "0c053cf0329e0100c5255cfdd55defcz",
 		},
+		AzureIoTHubOptions: &AzureIoTHubOptions{
+			ConnectionString: "",
+		},
 	}
 	return options
 }
@@ -263,7 +272,6 @@ func getWriteDataMessageFromCmdMessage(data interface{}, ts_string string) Write
 	}
 
 	message := WriteDataMessage{
-		//Timestamp: time.Now(),
 		Timestamp: ts,
 	}
 	for device, value := range m {

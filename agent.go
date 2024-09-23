@@ -2,12 +2,14 @@ package agent
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io/ioutil"
+	"io"
+	"log"
 	"net/http"
 	"time"
 
+	"github.com/amenzhinsky/iothub/iotdevice"
+	iotmqtt "github.com/amenzhinsky/iothub/iotdevice/transport/mqtt"
 	MQTT "github.com/eclipse/paho.mqtt.golang"
 	UUID "github.com/google/uuid"
 )
@@ -28,7 +30,7 @@ type Agent interface {
 // Agent ...
 type agent struct {
 	options           EdgeAgentOptions
-	client            MQTT.Client // interface
+	client            Client // interface
 	heartbeatTimer    chan bool
 	dataRecoverTimer  chan bool
 	dataRecoverHelper DataRecoverHelper
@@ -67,7 +69,9 @@ func NewAgent(options *EdgeAgentOptions) Agent {
 	// add cfg to memory from disk
 	helper := newTagsCfgHelper()
 	helper.getCfgFromFile(a, a.options.NodeID+tagsCfgFilePath)
-
+	if err := a.newClient(); err != nil {
+		log.Fatal(err)
+	}
 	return a
 }
 
@@ -76,34 +80,15 @@ func (a *agent) IsConnected() bool {
 	if a.client == nil {
 		return false
 	}
-	return a.client.IsConnectionOpen()
+	return a.client.IsConnected()
 }
 
 // Connect ...
 func (a *agent) Connect() error {
-
-	if a.IsConnected() {
-		return nil
+	if err := a.client.Connect(); err != nil {
+		return err
 	}
-	if a.options.ConnectType == ConnectType["DCCS"] {
-		if !a.options.DCCS.isValid() {
-			return errors.New("DCCS options is invalid")
-		}
-		error := a.getCredentailFromDCCS()
-		if error != nil {
-			fmt.Println(error)
-			return error
-		}
-	}
-	if !a.options.MQTT.isValid() {
-		return errors.New("MQTT options is invalid")
-	}
-
-	clientOptions, _ := a.newClientOptions()
-	a.client = MQTT.NewClient(clientOptions)
-	if token := a.client.Connect(); token.Wait() && token.Error() != nil {
-		return token.Error()
-	}
+	a.handleOnConnect()
 	return nil
 }
 
@@ -119,12 +104,8 @@ func (a *agent) Disconnect() {
 		topic = fmt.Sprintf(mqttTopic["NodeConnTopic"], a.options.NodeID)
 	}
 	payload := newDisconnectMessage().getPayload()
-	if token := a.client.Publish(topic, mqttQoS["AtLeastOnce"], true, payload); token.Wait() && token.Error() != nil {
-		fmt.Println("token error in Disconnect: ", token.Error())
-	}
-
 	go a.handleDisconnect()
-	a.client.Disconnect(0)
+	a.client.Disconnect(topic, payload)
 }
 
 func (a *agent) UploadConfig(action byte, config EdgeConfig) bool {
@@ -155,8 +136,8 @@ func (a *agent) UploadConfig(action byte, config EdgeConfig) bool {
 
 	if result {
 		topic := fmt.Sprintf(mqttTopic["ConfigTopic"], a.options.NodeID)
-		if token := a.client.Publish(topic, mqttQoS["AtLeastOnce"], true, payload.getPayload()); token.Wait() && token.Error() != nil {
-			fmt.Println("token error in UploadConfig: ", token.Error())
+		if err := a.client.Publish(topic, []byte(payload.getPayload())); err != nil {
+			fmt.Println("error in upload config: ", err)
 			result = false
 		}
 	}
@@ -177,8 +158,8 @@ func (a *agent) SendDeviceStatus(statuses EdgeDeviceStatus) bool {
 	}
 	payload := msg.getPayload()
 	topic := fmt.Sprintf(mqttTopic["NodeConnTopic"], a.options.NodeID)
-	if token := a.client.Publish(topic, mqttQoS["AtLeastOnce"], true, payload); token.Wait() && token.Error() != nil {
-		fmt.Println("token error in SendDviceStatus: ", token.Error())
+	if err := a.client.Publish(topic, []byte(payload)); err != nil {
+		fmt.Println("error in send dvice status: ", err)
 		return false
 	}
 	return true
@@ -196,8 +177,8 @@ func (a *agent) SendData(data EdgeData) bool {
 		result = false
 	} else {
 		for _, payload := range payloads {
-			if token := a.client.Publish(topic, mqttQoS["AtLeastOnce"], true, payload); token.Wait() && token.Error() != nil {
-				fmt.Println("token error in SendData: ", token.Error())
+			if err := a.client.Publish(topic, []byte(payload)); err != nil {
+				fmt.Println("error in send data: ", err)
 				if a.dataRecoverHelper != nil {
 					a.dataRecoverHelper.Write(payload)
 				}
@@ -219,7 +200,7 @@ func (a *agent) getCredentailFromDCCS() error {
 		return error
 	}
 
-	body, error := ioutil.ReadAll(res.Body)
+	body, error := io.ReadAll(res.Body)
 	if error != nil {
 		return error
 	}
@@ -257,7 +238,41 @@ func (a *agent) getCredentailFromDCCS() error {
 	return nil
 }
 
-func (a *agent) newClientOptions() (*MQTT.ClientOptions, error) {
+func (a *agent) newClient() error {
+	switch a.options.ConnectType {
+	case "MQTT", "DCCS":
+		if a.options.ConnectType == ConnectType["DCCS"] {
+			if !a.options.DCCS.isValid() {
+				return fmt.Errorf("DCCS options is invalid")
+			}
+			error := a.getCredentailFromDCCS()
+			if error != nil {
+				fmt.Println(error)
+				return error
+			}
+		}
+		if !a.options.MQTT.isValid() {
+			return fmt.Errorf("MQTT options is invalid")
+		}
+
+		clientOptions, _ := a.newMQTTOptions()
+		mqttClient := MQTT.NewClient(clientOptions)
+		a.client = &MQTTClient{client: mqttClient}
+	case "AzureIoTHub":
+		c, err := iotdevice.NewFromConnectionString(iotmqtt.New(), a.options.AzureIoTHubOptions.ConnectionString)
+		if err != nil {
+			return err
+		}
+		a.client = &AzureIoTClient{
+			client: c,
+		}
+	default:
+		return fmt.Errorf("unsupported ConnectType: %s", a.options.ConnectType)
+	}
+	return nil
+}
+
+func (a *agent) newMQTTOptions() (*MQTT.ClientOptions, error) {
 	clientOptions := MQTT.NewClientOptions()
 	schema := protocolScheme[Protocol["TCP"]]
 	// Enable Debug
@@ -287,8 +302,6 @@ func (a *agent) newClientOptions() (*MQTT.ClientOptions, error) {
 	topic := fmt.Sprintf(mqttTopic["NodeConnTopic"], a.options.NodeID)
 	payload := newWillMessage().getPayload()
 	clientOptions.SetWill(topic, payload, mqttQoS["AtLeastOnce"], true)
-
-	clientOptions.SetOnConnectHandler(a.handleOnConnect)
 	clientOptions.SetConnectionLostHandler(func(c MQTT.Client, err error) {
 		fmt.Println("Reconnecting...")
 		if err != nil {
@@ -317,18 +330,18 @@ func (a *agent) SetOnMessageReceiveHandler(onMessageReceive OnMessageReceiveHand
 	a.OnMessageReceive = onMessageReceive
 }
 
-func (a *agent) handleOnConnect(c MQTT.Client) {
+func (a *agent) handleOnConnect() {
 	/* subscribe */
 	cmdTopic := fmt.Sprintf(mqttTopic["DeviceCmdTopic"], a.options.NodeID, a.options.DeviceID)
 	if a.options.Type == EdgeType["Gateway"] {
 		cmdTopic = fmt.Sprintf(mqttTopic["NodeCmdTopic"], a.options.NodeID)
 	}
-	if token := a.client.Subscribe(cmdTopic, mqttQoS["AtLeastOnce"], a.handleCmdReceive); token.Wait() && token.Error() != nil {
-		fmt.Println(token.Error())
+	if err := a.client.Subscribe(cmdTopic, a.handleCmdReceive); err != nil {
+		fmt.Println("Failed to subscribe Cmd: ", err)
 	}
 	ackTopic := fmt.Sprintf(mqttTopic["AckTopic"], a.options.NodeID)
-	if token := a.client.Subscribe(ackTopic, mqttQoS["AtLeastOnce"], a.handleAckReceive); token.Wait() && token.Error() != nil {
-		fmt.Println(token.Error())
+	if err := a.client.Subscribe(ackTopic, a.handleAckReceive); err != nil {
+		fmt.Println("Failed to subscribe Ack: ", err)
 	}
 
 	/* Send connect Message */
@@ -337,8 +350,8 @@ func (a *agent) handleOnConnect(c MQTT.Client) {
 		topic = fmt.Sprintf(mqttTopic["NodeConnTopic"], a.options.NodeID)
 	}
 	payload := newConnMessage().getPayload()
-	if token := a.client.Publish(topic, mqttQoS["AtLeastOnce"], true, payload); token.Wait() && token.Error() != nil {
-		fmt.Println(token.Error())
+	if err := a.client.Publish(topic, []byte(payload)); err != nil {
+		fmt.Println("Failed to publish Conn: ", err)
 	}
 
 	/* heartbeat */
@@ -356,7 +369,7 @@ func (a *agent) handleOnConnect(c MQTT.Client) {
 }
 
 func (a *agent) handleDisconnect() {
-	for a.client.IsConnectionOpen() {
+	for a.client.IsConnected() {
 	}
 	fmt.Println("Disconnected...")
 	a.client = nil
@@ -367,8 +380,8 @@ func (a *agent) handleDisconnect() {
 	go a.OnDisconnect(a)
 }
 
-func (a *agent) handleCmdReceive(c MQTT.Client, msg MQTT.Message) {
-	payload := string(msg.Payload())
+func (a *agent) handleCmdReceive(msg []byte) {
+	payload := string(msg)
 	if !isJSON(payload) {
 		fmt.Println("Invalid JSON format")
 		return
@@ -397,8 +410,8 @@ func (a *agent) handleCmdReceive(c MQTT.Client, msg MQTT.Message) {
 	go a.OnMessageReceive(res, a)
 }
 
-func (a *agent) handleAckReceive(c MQTT.Client, msg MQTT.Message) {
-	payload := string(msg.Payload())
+func (a *agent) handleAckReceive(msg []byte) {
+	payload := string(msg)
 	if !isJSON(payload) {
 		fmt.Println("Invalid JSON format")
 		return
@@ -436,8 +449,8 @@ func (a *agent) sendHeartBeat() {
 		topic = fmt.Sprintf(mqttTopic["NodeConnTopic"], a.options.NodeID)
 	}
 	payload := newHeartBeatMessage().getPayload()
-	if token := a.client.Publish(topic, mqttQoS["AtLeastOnce"], true, payload); token.Wait() && token.Error() != nil {
-		fmt.Println("token error in sendHeartBeat: ", token.Error())
+	if err := a.client.Publish(topic, []byte(payload)); err != nil {
+		fmt.Println("error in sendHeartBeat: ", err)
 	}
 }
 
@@ -460,8 +473,8 @@ func (a *agent) sendRecover() {
 			helper.Write(message)
 			continue
 		}
-		if token := a.client.Publish(topic, mqttQoS["AtLeastOnce"], false, message); token.Wait() && token.Error() != nil {
-			fmt.Println("token error in sendRecover: ", token.Error())
+		if err := a.client.Publish(topic, []byte(message)); err != nil {
+			fmt.Println("error in sendRecover: ", err)
 			helper.Write(message)
 		}
 	}

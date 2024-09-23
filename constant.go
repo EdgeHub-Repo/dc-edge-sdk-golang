@@ -27,8 +27,9 @@ var Action = map[string]byte{
 
 // ConnectType ...
 var ConnectType = map[string]string{
-	"MQTT": "MQTT",
-	"DCCS": "DCCS",
+	"MQTT":        "MQTT",
+	"DCCS":        "DCCS",
+	"AzureIoTHub": "AzureIoTHub",
 }
 
 // EdgeType ...
